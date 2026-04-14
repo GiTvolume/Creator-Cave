@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { GoogleGenAI, Type } from '@google/genai';
+import { Type } from '@google/genai';
 import { ChevronLeft, Loader2, Plus, Settings, Sparkles, FolderOpen } from 'lucide-react';
 
 type Screen = 'setup' | 'home' | 'workspace' | 'detail' | 'plan' | 'schedule';
@@ -132,6 +132,20 @@ export default function App() {
     }
   }, []);
 
+  const generateContent = async (goal: string, params: any) => {
+    switch (goal) {
+      case 'script': return await generateScriptWithRetry(params.idea, params.platform);
+      case 'caption': return await generateCaptionWithRetry(params.idea, params.platform);
+      case 'trends': return await generateTrendsWithRetry(params.niche);
+      case 'score': return await generateScoreWithRetry(params.idea);
+      case 'todayPlan': return await generateTodayPlanWithRetry(params.ctx);
+      case 'plan': return await generatePlanWithRetry(params.ctx);
+      case 'schedule': return await generateScheduleWithRetry(params.plan, params.tz);
+      case 'ideas': return await generateIdeasWithRetry(params.ctx);
+      default: throw new Error("Unknown goal");
+    }
+  };
+
   const handleSaveContext = () => {
     if (!nicheInput.trim()) {
       setError('Please enter a niche');
@@ -151,8 +165,8 @@ export default function App() {
     setError(null);
     
     try {
-      const newIdeasStrings = await generateIdeasWithRetry(context);
-      const newIdeas: Idea[] = newIdeasStrings.map(idea => ({ idea }));
+      const newIdeasStrings = await generateContent('ideas', { ctx: context }) as string[];
+      const newIdeas: Idea[] = newIdeasStrings.map((idea: string) => ({ idea }));
       const updatedIdeas = [...newIdeas, ...ideas];
       setIdeas(updatedIdeas);
       localStorage.setItem('scorpio_ideas', JSON.stringify(updatedIdeas));
@@ -172,7 +186,7 @@ export default function App() {
     setError(null);
     
     try {
-      const script = await generateScriptWithRetry(selectedIdea.idea, context.platform);
+      const script = await generateContent('script', { idea: selectedIdea.idea, platform: context.platform });
       
       const updatedIdea = { ...selectedIdea, script };
       const updatedIdeas = ideas.map(i => i === selectedIdea ? updatedIdea : i);
@@ -195,7 +209,7 @@ export default function App() {
     setError(null);
     
     try {
-      const { caption, tags } = await generateCaptionWithRetry(selectedIdea.idea, context.platform);
+      const { caption, tags } = await generateContent('caption', { idea: selectedIdea.idea, platform: context.platform }) as { caption: string, tags: string[] };
       
       const updatedIdea = { ...selectedIdea, caption, tags };
       const updatedIdeas = ideas.map(i => i === selectedIdea ? updatedIdea : i);
@@ -211,9 +225,49 @@ export default function App() {
     }
   };
 
-  const generateScriptWithRetry = async (idea: string, platform: string, retry = false): Promise<string[]> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+  const getFallbackResponse = (prompt: string): string => {
+    let p;
+    try {
+      p = JSON.parse(prompt);
+    } catch {
+      return JSON.stringify({ error: "Fallback" });
+    }
     
+    if (p.goal === 'ideas') return JSON.stringify({ ideas: ["Idea 1: How to get started", "Idea 2: 5 tips for success", "Idea 3: My daily routine", "Idea 4: Why I love this", "Idea 5: Common mistakes"] });
+    if (p.duration) return JSON.stringify({ script: ["Hook: Did you know this?", "Point 1: First, do this.", "Point 2: Then, do that.", "CTA: Follow for more!"] });
+    if (p.tone) return JSON.stringify({ caption: "This is a great tip!", tags: ["#tips", "#success", "#daily", "#learning", "#growth"] });
+    if (p.goal === 'trends') return JSON.stringify({ trends: ["Trend 1", "Trend 2", "Trend 3", "Trend 4", "Trend 5"] });
+    if (p.hist && p.trend) return JSON.stringify({ score: 0.5, action: "post" });
+    if (p.goal === 'today') return JSON.stringify({ idea: "Share a quick tip", type: "reel", hook: "Stop scrolling!" });
+    if (p.goal === 'weekly') return JSON.stringify({ plan: ["mon-reel", "tue-post", "wed-carousel", "thu-reel", "fri-post", "sat-carousel", "sun-reel"] });
+    if (p.plan) return JSON.stringify({ slots: ["mon-10", "tue-18", "wed-12", "thu-15", "fri-09", "sat-11", "sun-14"] });
+    
+    // Default fallback
+    return JSON.stringify({
+      idea: "Short viral content idea",
+      script: ["Hook: Did you know?", "Point 1: First step.", "Point 2: Second step.", "CTA: Follow for more!"],
+      caption: "Short engaging caption",
+      tags: ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"]
+    });
+  };
+
+  const callGeminiApi = async (prompt: string, config: any) => {
+    try {
+      const response = await fetch('/api/gemini', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, config })
+      });
+      if (!response.ok) throw new Error('Failed to call Gemini API');
+      const data = await response.json();
+      return data.text;
+    } catch (error) {
+      console.error("Gemini API call failed, using fallback:", error);
+      return getFallbackResponse(prompt);
+    }
+  };
+
+  const generateScriptWithRetry = async (idea: string, platform: string, retry = false): Promise<string[]> => {
     const prompt = JSON.stringify({
       idea,
       platform,
@@ -221,25 +275,21 @@ export default function App() {
     });
 
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              script: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING }
-              }
-            },
-            required: ["script"]
-          }
+      const text = await callGeminiApi(prompt, {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            script: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            }
+          },
+          required: ["script"]
         }
       });
 
-      const parsed = JSON.parse(response.text || "{}");
+      const parsed = JSON.parse(text || "{}");
       if (!parsed.script || !Array.isArray(parsed.script)) throw new Error("Invalid script format");
       return parsed.script;
     } catch (err) {
@@ -249,8 +299,6 @@ export default function App() {
   };
 
   const generateCaptionWithRetry = async (idea: string, platform: string, retry = false): Promise<{caption: string, tags: string[]}> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    
     const prompt = JSON.stringify({
       idea,
       platform,
@@ -258,26 +306,22 @@ export default function App() {
     });
 
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              caption: { type: Type.STRING },
-              tags: {
-                type: Type.ARRAY,
-                items: { type: Type.STRING }
-              }
-            },
-            required: ["caption", "tags"]
-          }
+      const text = await callGeminiApi(prompt, {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            caption: { type: Type.STRING },
+            tags: {
+              type: Type.ARRAY,
+              items: { type: Type.STRING }
+            }
+          },
+          required: ["caption", "tags"]
         }
       });
 
-      const parsed = JSON.parse(response.text || "{}");
+      const parsed = JSON.parse(text || "{}");
       if (!parsed.caption || !Array.isArray(parsed.tags)) throw new Error("Invalid caption format");
       return { caption: parsed.caption, tags: parsed.tags };
     } catch (err) {
@@ -386,30 +430,25 @@ export default function App() {
   };
 
   const generateTodayPlanWithRetry = async (ctx: Context, retry = false): Promise<TodayPlan> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const prompt = JSON.stringify({
       ctx: { n: ctx.niche, p: [ctx.platform] },
       hist: [],
       goal: "today"
     });
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              idea: { type: Type.STRING },
-              type: { type: Type.STRING, enum: ["reel", "post", "carousel"] },
-              hook: { type: Type.STRING }
-            },
-            required: ["idea", "type", "hook"]
-          }
+      const text = await callGeminiApi(prompt, {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            idea: { type: Type.STRING },
+            type: { type: Type.STRING, enum: ["reel", "post", "carousel"] },
+            hook: { type: Type.STRING }
+          },
+          required: ["idea", "type", "hook"]
         }
       });
-      const parsed = JSON.parse(response.text || "{}");
+      const parsed = JSON.parse(text || "{}");
       if (!parsed.idea || !parsed.type || !parsed.hook) throw new Error("Invalid today plan format");
       return parsed;
     } catch (err) {
@@ -419,24 +458,19 @@ export default function App() {
   };
 
   const generateTrendsWithRetry = async (niche: string, retry = false): Promise<string[]> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const prompt = JSON.stringify({ ctx: { n: niche }, goal: "trends", count: 5 });
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              trends: { type: Type.ARRAY, items: { type: Type.STRING } }
-            },
-            required: ["trends"]
-          }
+      const text = await callGeminiApi(prompt, {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            trends: { type: Type.ARRAY, items: { type: Type.STRING } }
+          },
+          required: ["trends"]
         }
       });
-      const parsed = JSON.parse(response.text || "{}");
+      const parsed = JSON.parse(text || "{}");
       if (!parsed.trends || !Array.isArray(parsed.trends)) throw new Error("Invalid trends format");
       return parsed.trends;
     } catch (err) {
@@ -446,25 +480,20 @@ export default function App() {
   };
 
   const generateScoreWithRetry = async (idea: string, retry = false): Promise<{score: number, action: string}> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const prompt = JSON.stringify({ idea, hist: [], trend: 1 });
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              score: { type: Type.NUMBER },
-              action: { type: Type.STRING, enum: ["post", "revise", "drop"] }
-            },
-            required: ["score", "action"]
-          }
+      const text = await callGeminiApi(prompt, {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            score: { type: Type.NUMBER },
+            action: { type: Type.STRING, enum: ["post", "revise", "drop"] }
+          },
+          required: ["score", "action"]
         }
       });
-      const parsed = JSON.parse(response.text || "{}");
+      const parsed = JSON.parse(text || "{}");
       if (typeof parsed.score !== 'number' || !parsed.action) throw new Error("Invalid score format");
       return { score: parsed.score, action: parsed.action };
     } catch (err) {
@@ -508,7 +537,6 @@ export default function App() {
   };
 
   const generatePlanWithRetry = async (ctx: Context, retry = false): Promise<string[]> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const prompt = JSON.stringify({
       ctx: { n: ctx.niche, p: [ctx.platform] },
       hist: [],
@@ -516,21 +544,17 @@ export default function App() {
       days: 7
     });
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              plan: { type: Type.ARRAY, items: { type: Type.STRING } }
-            },
-            required: ["plan"]
-          }
+      const text = await callGeminiApi(prompt, {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            plan: { type: Type.ARRAY, items: { type: Type.STRING } }
+          },
+          required: ["plan"]
         }
       });
-      const parsed = JSON.parse(response.text || "{}");
+      const parsed = JSON.parse(text || "{}");
       if (!parsed.plan || !Array.isArray(parsed.plan)) throw new Error("Invalid plan format");
       return parsed.plan;
     } catch (err) {
@@ -540,24 +564,19 @@ export default function App() {
   };
 
   const generateScheduleWithRetry = async (plan: string[], tz: string, retry = false): Promise<string[]> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const prompt = JSON.stringify({ plan, tz });
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              slots: { type: Type.ARRAY, items: { type: Type.STRING } }
-            },
-            required: ["slots"]
-          }
+      const text = await callGeminiApi(prompt, {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            slots: { type: Type.ARRAY, items: { type: Type.STRING } }
+          },
+          required: ["slots"]
         }
       });
-      const parsed = JSON.parse(response.text || "{}");
+      const parsed = JSON.parse(text || "{}");
       if (!parsed.slots || !Array.isArray(parsed.slots)) throw new Error("Invalid schedule format");
       return parsed.slots;
     } catch (err) {
@@ -567,8 +586,6 @@ export default function App() {
   };
 
   const generateIdeasWithRetry = async (ctx: Context, retry = false): Promise<string[]> => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    
     const prompt = JSON.stringify({
       ctx: { n: ctx.niche, p: [ctx.platform] },
       goal: "ideas",
@@ -576,30 +593,23 @@ export default function App() {
     });
 
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              ideas: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.STRING
-                }
+      const text = await callGeminiApi(prompt, {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            ideas: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.STRING
               }
-            },
-            required: ["ideas"]
-          }
+            }
+          },
+          required: ["ideas"]
         }
       });
-
-      const text = response.text;
-      if (!text) throw new Error("No text returned");
       
-      const parsed = JSON.parse(text);
+      const parsed = JSON.parse(text || "{}");
       if (!parsed.ideas || !Array.isArray(parsed.ideas)) {
         throw new Error("Invalid JSON structure");
       }
